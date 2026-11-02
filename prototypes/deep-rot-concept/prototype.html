@@ -1,0 +1,250 @@
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: Does diving with depth-scaled Sanity drain make "go deeper or climb up?" a tense choice that does not get solved? -->
+<!-- Date: 2026-11-02 -->
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Deep Rot — prototype</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;background:#111;color:#eee;font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center}
+canvas{background:#000;margin-top:8px;max-width:100%;display:block}
+#surface{width:800px;max-width:100%;padding:12px;box-sizing:border-box}
+button{font-size:15px;padding:8px 14px;margin:4px 4px 4px 0;cursor:pointer}
+table{border-collapse:collapse;font-size:13px;width:100%;margin-top:8px}
+td,th{border:1px solid #444;padding:3px 6px;text-align:center}
+.help{font-size:13px;color:#aaa;line-height:1.5}
+.rot{color:#f66}.ok{color:#6f6}
+</style></head><body>
+<canvas id="c" width="800" height="560"></canvas>
+<div id="surface"></div>
+<script>
+// ---------- tuning (hardcoded on purpose: prototype) ----------
+const T = {
+  baseSanity: 60, sanityPerUpgrade: 15,
+  baseSlots: 3,
+  drainBase: 1.0, drainPerFloor: 0.55,      // sanity/sec = drainBase + drainPerFloor*(floor-1)
+  climbPerFloor: 4,                          // sanity cost to climb out = climbPerFloor * floor
+  floors: 6,
+  surgeFromFloor: 3, surgeChancePerSec: 0.04, surgeMult: 3, surgeDur: 2.5,
+  speed: 170, grabRange: 40, creaturesPerFloor: 7
+};
+const TIERS = [
+  {n:'Common', c:'#9ab', v:5,   hold:0,   spd:30},
+  {n:'Rare',   c:'#4af', v:25,  hold:0.5, spd:55},
+  {n:'Epic',   c:'#c5f', v:100, hold:1.0, spd:75},
+  {n:'Mythic', c:'#fc3', v:400, hold:1.6, spd:95}
+];
+const WEIGHTS = {1:[90,10,0,0],2:[70,25,5,0],3:[50,35,13,2],4:[35,38,22,5],5:[22,38,30,10],6:[12,33,35,20]};
+const NAMES = [
+  ['Fridgeopotamus','Bread Mandrill','Sockodile','Lampwhale','Mopgoblin'],
+  ['Cappuccino Squid','Sir Spoonathan','Toastrich','Bananacuda'],
+  ['Ballerina Cactus','Sharkuterie','Disco Moth Supreme','Waffle Kraken'],
+  ['The Gorbmother','Glitchapus Rex','Eternal Microwave']
+];
+
+// ---------- state ----------
+const cv = document.getElementById('c'), g = cv.getContext('2d'), ui = document.getElementById('surface');
+const P = { coins:0, sanLvl:0, slotLvl:0, log:[], best:{}, start:performance.now() };
+let mode = 'surface', D = null, msg = '', msgT = 0;
+const keys = {};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key===' ') e.preventDefault(); if (e.key.toLowerCase()==='e') useExit(); });
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+// touch / mouse: hold to walk toward the finger; standing still on a creature = grab; tap rope/hole when next to it
+const ptr = { down:false, x:0, y:0 };
+function ptrPos(e){ const r = cv.getBoundingClientRect(); ptr.x = (e.clientX-r.left)*800/r.width; ptr.y = (e.clientY-r.top)*560/r.height; }
+cv.addEventListener('pointerdown', e => { e.preventDefault(); ptr.down = true; ptrPos(e);
+  if (mode==='dive') for (const ex of [D.rope, D.hole]) if (dist(ptr.x,ptr.y,ex.x,ex.y) < 50 && dist(D.px,D.py,ex.x,ex.y) < 50) useExit(); });
+cv.addEventListener('pointermove', e => { if (ptr.down) ptrPos(e); });
+addEventListener('pointerup', () => { ptr.down = false; });
+cv.style.touchAction = 'none';
+
+const maxSan = () => T.baseSanity + T.sanityPerUpgrade * P.sanLvl;
+const slots  = () => T.baseSlots + P.slotLvl;
+const drain  = f => T.drainBase + T.drainPerFloor * (f - 1);
+const climbCost = f => T.climbPerFloor * f;
+const sanCost  = () => Math.round(40 * Math.pow(P.sanLvl + 1, 1.5));
+const slotCost = () => Math.round(60 * Math.pow(P.slotLvl + 1, 1.6));
+const rnd = (a,b) => a + Math.random()*(b-a);
+function pickTier(f){ const w = WEIGHTS[f]; let r = Math.random()*100; for (let i=0;i<4;i++){ if ((r -= w[i]) < 0) return i; } return 0; }
+function say(s){ msg = s; msgT = 2.2; }
+
+// ---------- dive ----------
+function startDive(){
+  D = { floor:0, san:maxSan(), carried:[], deepest:1, surge:0, t0:performance.now() };
+  // "pushed past" = deeper than the deepest floor of the last dive that was banked safely
+  const lastSafe = [...P.log].reverse().find(l => l.outcome === 'BANKED');
+  D.lastSafe = lastSafe ? lastSafe.deepest : 0;
+  nextFloor(); mode = 'dive'; renderSurface();
+}
+function nextFloor(){
+  D.floor++; D.deepest = Math.max(D.deepest, D.floor);
+  D.px = 90; D.py = 280; D.grab = null; D.grabT = 0;
+  D.rope = {x:50, y:280}; D.hole = {x:750, y:280};
+  D.cr = [];
+  for (let i=0;i<T.creaturesPerFloor;i++){
+    const t = pickTier(D.floor);
+    D.cr.push({ x:rnd(160,700), y:rnd(60,500), vx:0, vy:0, t, name:NAMES[t][Math.floor(Math.random()*NAMES[t].length)], wob:Math.random()*6 });
+  }
+  say('Floor ' + D.floor + (D.floor >= T.surgeFromFloor ? '  — rot surges possible' : ''));
+}
+function useExit(){
+  if (mode !== 'dive') return;
+  if (dist(D.px,D.py,D.rope.x,D.rope.y) < 45){
+    const cost = climbCost(D.floor);
+    if (D.san >= cost){ D.san -= cost; endDive('BANKED'); }
+    else { D.san = 0; endDive('ROTTED'); }
+  } else if (dist(D.px,D.py,D.hole.x,D.hole.y) < 45){
+    if (D.floor < T.floors) nextFloor(); else say('The Bottom is not in this prototype.');
+  }
+}
+function endDive(outcome){
+  const total = D.carried.reduce((s,c)=>s+TIERS[c.t].v,0);
+  let banked = total, kept = null;
+  if (outcome === 'ROTTED'){
+    kept = D.carried.slice().sort((a,b)=>TIERS[b.t].v - TIERS[a.t].v)[0] || null;
+    banked = kept ? TIERS[kept.t].v : 0;
+  }
+  P.coins += banked;
+  P.log.push({ n:P.log.length+1, deepest:D.deepest, outcome, sanLeft:Math.round(D.san), banked, lost:total-banked,
+               pushed: D.deepest > D.lastSafe && P.log.length > 0, secs:Math.round((performance.now()-D.t0)/1000),
+               kept: kept ? kept.name : '' });
+  mode = 'surface'; D = null; renderSurface();
+}
+const dist = (a,b,c,d) => Math.hypot(a-c,b-d);
+
+function update(dt){
+  if (msgT > 0) msgT -= dt;
+  if (mode !== 'dive') return;
+  // move
+  let mx = (keys['d']||keys['arrowright']?1:0) - (keys['a']||keys['arrowleft']?1:0);
+  let my = (keys['s']||keys['arrowdown']?1:0) - (keys['w']||keys['arrowup']?1:0);
+  let pGrab = false;
+  if (ptr.down && !mx && !my){ const dx = ptr.x-D.px, dy = ptr.y-D.py; if (Math.hypot(dx,dy) > 18){ mx = dx; my = dy; } else pGrab = true; }
+  const m = Math.hypot(mx,my) || 1;
+  const moving = mx || my;
+  D.px = Math.max(15, Math.min(785, D.px + mx/m*T.speed*dt));
+  D.py = Math.max(15, Math.min(545, D.py + my/m*T.speed*dt));
+  // sanity + surges
+  if (D.floor >= T.surgeFromFloor && D.surge <= 0 && Math.random() < T.surgeChancePerSec*dt){ D.surge = T.surgeDur; say('ROT SURGE!'); }
+  if (D.surge > 0) D.surge -= dt;
+  D.san -= drain(D.floor) * (D.surge > 0 ? T.surgeMult : 1) * dt;
+  if (D.san <= 0){ D.san = 0; endDive('ROTTED'); return; }
+  // creatures wander, non-commons flee when close
+  for (const c of D.cr){
+    c.wob += dt;
+    const d = dist(c.x,c.y,D.px,D.py), sp = TIERS[c.t].spd;
+    if (c.t > 0 && d < 120 && c !== D.grab){ c.vx = (c.x-D.px)/d*sp; c.vy = (c.y-D.py)/d*sp; }
+    else if (Math.random() < dt*0.8){ c.vx = rnd(-1,1)*sp*0.6; c.vy = rnd(-1,1)*sp*0.6; }
+    if (c === D.grab){ c.vx = 0; c.vy = 0; }
+    c.x = Math.max(110, Math.min(700, c.x + c.vx*dt)); c.y = Math.max(20, Math.min(540, c.y + c.vy*dt));
+  }
+  // grab: hold Space near a creature; rares need a still hold
+  if (keys[' '] || pGrab){
+    if (!D.grab){
+      let best = null, bd = T.grabRange;
+      for (const c of D.cr){ const d = dist(c.x,c.y,D.px,D.py); if (d < bd){ bd = d; best = c; } }
+      if (best){ D.grab = best; D.grabT = 0; }
+    }
+    if (D.grab){
+      if (moving || dist(D.grab.x,D.grab.y,D.px,D.py) > T.grabRange + 10){ D.grab = null; D.grabT = 0; }
+      else {
+        D.grabT += dt;
+        if (D.grabT >= TIERS[D.grab.t].hold) takeCreature(D.grab);
+      }
+    }
+  } else { D.grab = null; D.grabT = 0; }
+}
+function takeCreature(c){
+  if (D.carried.length >= slots()){
+    const low = D.carried.reduce((a,b)=>TIERS[a.t].v <= TIERS[b.t].v ? a : b);
+    if (TIERS[low.t].v >= TIERS[c.t].v){ say('Hands full — drop nothing better'); D.grab = null; return; }
+    D.carried.splice(D.carried.indexOf(low),1); say('Dropped ' + low.name + ' for ' + c.name + '!');
+  } else say('Got ' + c.name + ' (' + TIERS[c.t].n + ')!');
+  D.carried.push(c); D.cr.splice(D.cr.indexOf(c),1); D.grab = null; D.grabT = 0;
+}
+
+// ---------- draw ----------
+function draw(){
+  g.setTransform(1,0,0,1,0,0);
+  if (mode !== 'dive'){
+    g.fillStyle = '#1b2430'; g.fillRect(0,0,800,560);
+    g.fillStyle = '#ffb347'; g.font = 'bold 40px system-ui'; g.textAlign = 'center';
+    g.fillText('THE SURFACE', 400, 250);
+    g.font = '18px system-ui'; g.fillStyle = '#ccc';
+    g.fillText('Spend coins below, then DIVE.', 400, 290);
+    return;
+  }
+  const frac = D.san / maxSan();
+  const shake = frac < 0.3 ? (0.3-frac)*20 : 0;
+  g.setTransform(1,0,0,1, rnd(-shake,shake), rnd(-shake,shake));
+  // cave gets more saturated / stranger with depth
+  const hue = 220 - D.floor*25;
+  g.fillStyle = `hsl(${hue},${15 + D.floor*8}%,${11 - D.floor}%)`; g.fillRect(-20,-20,840,600);
+  if (D.surge > 0){ g.fillStyle = 'rgba(160,0,200,0.18)'; g.fillRect(-20,-20,840,600); }
+  // rope (up) and hole (down)
+  g.fillStyle = '#ffb347'; g.fillRect(D.rope.x-6, 0, 12, D.rope.y);
+  g.beginPath(); g.arc(D.rope.x, D.rope.y, 22, 0, 7); g.fill();
+  g.fillStyle = '#000'; g.strokeStyle = '#a44'; g.lineWidth = 3;
+  g.beginPath(); g.arc(D.hole.x, D.hole.y, 30, 0, 7); g.fill(); g.stroke();
+  g.font = '13px system-ui'; g.textAlign = 'center'; g.fillStyle = '#fff';
+  g.fillText('CLIMB [E]', D.rope.x+10, D.rope.y+40);
+  g.fillText('cost ' + climbCost(D.floor), D.rope.x+10, D.rope.y+56);
+  g.fillText(D.floor < T.floors ? 'DEEPER [E]' : 'THE BOTTOM', D.hole.x, D.hole.y+48);
+  // creatures
+  for (const c of D.cr){
+    const r = 12 + c.t*4, w = Math.sin(c.wob*8)*(c===D.grab ? 5 : 1.5);
+    g.fillStyle = TIERS[c.t].c;
+    if (c.t >= 2){ g.shadowColor = TIERS[c.t].c; g.shadowBlur = 14; }
+    g.beginPath(); g.arc(c.x + w, c.y, r, 0, 7); g.fill(); g.shadowBlur = 0;
+    g.fillStyle = '#ddd'; g.font = '11px system-ui'; g.fillText(c.name, c.x, c.y - r - 4);
+  }
+  // grab progress
+  if (D.grab && TIERS[D.grab.t].hold > 0){
+    const p = D.grabT / TIERS[D.grab.t].hold;
+    g.strokeStyle = '#fff'; g.lineWidth = 4; g.beginPath();
+    g.arc(D.grab.x, D.grab.y, 26 + D.grab.t*4, -Math.PI/2, -Math.PI/2 + p*Math.PI*2); g.stroke();
+  }
+  // player
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(D.px, D.py, 11, 0, 7); g.fill();
+  g.fillStyle = '#000'; g.fillRect(D.px-5, D.py-3, 3, 3); g.fillRect(D.px+2, D.py-3, 3, 3);
+  // HUD
+  g.setTransform(1,0,0,1,0,0);
+  g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillRect(0,0,800,34);
+  g.fillStyle = '#333'; g.fillRect(10,9,260,16);
+  g.fillStyle = frac > 0.5 ? '#6c6' : frac > 0.25 ? '#ec4' : '#e44'; g.fillRect(10,9,260*frac,16);
+  g.fillStyle = '#fff'; g.font = '13px system-ui'; g.textAlign = 'left';
+  g.fillText('SANITY ' + Math.ceil(D.san) + '/' + maxSan() + '   −' + drain(D.floor).toFixed(1) + '/s' + (D.surge>0?' ×'+T.surgeMult:''), 14, 22);
+  g.fillText('FLOOR ' + D.floor + '/' + T.floors, 290, 22);
+  const val = D.carried.reduce((s,c)=>s+TIERS[c.t].v,0);
+  g.fillText('HANDS ' + D.carried.length + '/' + slots() + '  worth ' + val, 380, 22);
+  for (let i=0;i<D.carried.length;i++){ g.fillStyle = TIERS[D.carried[i].t].c; g.beginPath(); g.arc(600 + i*22, 17, 8, 0, 7); g.fill(); }
+  if (msgT > 0){ g.textAlign = 'center'; g.font = 'bold 22px system-ui'; g.fillStyle = '#fff'; g.fillText(msg, 400, 80); }
+}
+
+// ---------- surface UI ----------
+function renderSurface(){
+  if (mode === 'dive'){ ui.innerHTML = '<p class="help"><b>WASD/arrows</b> move · hold <b>Space</b> near a creature to grab (glowing ones squirm — stand still) · <b>E</b> at the rope to climb out, at the hole to go deeper (touch: hold to walk, hold still on a creature to grab, tap rope/hole when beside it) · hit 0 Sanity and you keep only your rarest catch.</p>'; return; }
+  const L = P.log, n = L.length;
+  const pushes = L.filter(l=>l.pushed).length, rots = L.filter(l=>l.outcome==='ROTTED').length;
+  const mins = ((performance.now()-P.start)/60000).toFixed(1);
+  ui.innerHTML = `
+    <h2 style="margin:4px 0">Coins: ${P.coins}</h2>
+    <button id="dive" style="font-weight:bold">DIVE</button>
+    <button id="up1" ${P.coins<sanCost()?'disabled':''}>Sanity tank +${T.sanityPerUpgrade} (${sanCost()})</button>
+    <button id="up2" ${P.coins<slotCost()?'disabled':''}>Carry slot +1 (${slotCost()})</button>
+    <p class="help">Sanity ${maxSan()} · Slots ${slots()} · Drain per floor: ${[1,2,3,4,5,6].map(f=>drain(f).toFixed(1)).join(' / ')} · Climb cost: ${[1,2,3,4,5,6].map(climbCost).join(' / ')}</p>
+    ${n ? `<p class="help">Dives: <b>${n}</b> · Pushed past last safe depth: <b>${pushes}/${Math.max(0,n-1)}</b> · Rotted: <b>${rots}</b> · Session: <b>${mins} min</b></p>
+    <table><tr><th>#</th><th>Deepest</th><th>Outcome</th><th>Sanity left</th><th>Banked</th><th>Lost</th><th>Pushed?</th><th>Secs</th></tr>
+    ${L.slice().reverse().map(l=>`<tr><td>${l.n}</td><td>${l.deepest}</td><td class="${l.outcome==='ROTTED'?'rot':'ok'}">${l.outcome}${l.kept?' (kept '+l.kept+')':''}</td><td>${l.sanLeft}</td><td>${l.banked}</td><td>${l.lost}</td><td>${l.pushed?'yes':''}</td><td>${l.secs}</td></tr>`).join('')}
+    </table><button id="copy">Copy log</button>` : '<p class="help">Press DIVE. Grab creatures, then decide on every floor: climb out (costs more Sanity the deeper you are) or go deeper for rarer ones.</p>'}`;
+  document.getElementById('dive').onclick = startDive;
+  document.getElementById('up1').onclick = () => { if (P.coins>=sanCost()){ P.coins-=sanCost(); P.sanLvl++; renderSurface(); } };
+  document.getElementById('up2').onclick = () => { if (P.coins>=slotCost()){ P.coins-=slotCost(); P.slotLvl++; renderSurface(); } };
+  const cp = document.getElementById('copy');
+  if (cp) cp.onclick = () => navigator.clipboard && navigator.clipboard.writeText(JSON.stringify(P.log, null, 1));
+}
+
+let last = performance.now();
+function frame(now){ const dt = Math.min(0.05, (now-last)/1000); last = now; update(dt); draw(); requestAnimationFrame(frame); }
+renderSurface(); requestAnimationFrame(frame);
+</script>
+</body></html>
