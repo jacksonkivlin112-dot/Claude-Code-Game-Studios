@@ -310,3 +310,21 @@ exciting enough to repeat dives for a 30-minute session.
 - [ ] If prototype PROCEEDS: decompose into systems (`/map-systems`)
 - [ ] Design each system (`/design-system [system-name]`)
 - [ ] Validate core loop with playtest (`/playtest-report`)
+
+---
+
+## Revision 2026-11-08 — Steal the Rot
+
+*Decision logged (autonomous, user-approved direction):* the HTML dive prototype was
+**NOT ASSESSED** — the user could not play it (mobile controls broken; abstract
+circles did not read as a game). The user asked for a Roblox "steal" game in the
+style of popular titles; the concept is revised to keep the dive and add stealing:
+
+- **Bases:** each player owns a plot of pedestals; creatures on them earn $/s.
+- **Source of creatures:** the Rot Cave dive (unchanged core loop).
+- **Stealing:** while you dive, your base is unguarded; others can steal from it.
+  Base lock (60 s, cooldown) and a Bonk Bat to recover stolen creatures.
+- **New tension for Pillar 1 (One More Floor):** every extra floor is better loot
+  *and* longer exposure of your base.
+- Bumping/bonking moves from post-MVP into the prototype because stealing needs a counter.
+- Implementation: Roblox Studio (Luau), prototype at `prototypes/steal-the-rot-roblox/`.
